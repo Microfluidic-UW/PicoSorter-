@@ -1,0 +1,181 @@
+// #define DEBUG 1
+
+#ifdef DEBUG
+  #define log(x) Serial.print(x) 
+  #define logln(x) Serial.println(x) 
+#else 
+  #define log(x)
+  #define logln(x) 
+#endif
+
+/*
+ABSORBANCE SORTING SCRIPT for 2D sorting gates
+*/
+
+//sorting variables
+const float threshV = 9.5;                            //set to voltage ~0.5 below  baseline
+const float sortHV = 8.4;                             //set to HIGH voltage limit for selection
+const float sortLV = 8.2;                             //set to LOW voltage limit for selection
+
+const uint16_t peakWH = 4000;                         //[2000]set to high size gate (in us) for selection
+const uint16_t peakWL = 30;                          //[500] set to low size gate (in us) for selection
+const uint16_t minDist = 0;                           //[1000] min distance (in us) to last peak to exclude doublets 
+
+const uint16_t sampleSize = 1;                        //number of data points for calculating SMA - simple moving average  (smoothing high frequency noise)
+
+const uint8_t triggerPin = 13;                        //D0: 13
+const uint8_t sensorPin = 54;                         //AI: A0     
+
+
+//electrode timing
+const uint16_t electrode_delay = 0;                      //pulse delay in us
+const uint16_t electrode_pulse = 1;                        //pulse width in ms
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//fast internal references for sorting thresholds (12 bits ADC values)
+uint16_t thresh;                            
+uint16_t sortH;                          
+uint16_t sortL;
+
+//buffer for the SMA
+uint16_t adcBuffer[sampleSize];
+uint16_t adcBufferIndex = 0;
+
+void setup() {
+  Serial.begin(115200);
+  PIOB->PIO_OER = (1 << 27);  //enable D13 (PB27)
+  REG_ADC_MR = 0x10380180;    //fast mode on ADC (A0)
+  REG_ADC_CHER = 0x80;        //enable ADC on A0
+  
+  
+  // analogReadResolution(12);
+
+  log("threshV:\t");
+  logln(threshV);
+  log("sortHV:\t");
+  logln(sortHV);
+  log("sortLV:\t");
+  logln(sortLV);
+
+  thresh = voltsToInt(threshV); 
+  sortH = voltsToInt(sortHV);
+  sortL = voltsToInt(sortLV);
+  
+  log("thresh:\t");
+  log(thresh);
+  log("\tin volts:\t");
+  logln(intsToVolts(thresh));
+  log("sortH:\t");
+  log(sortH);
+  log("\tin volts:\t");
+  logln(intsToVolts(sortH));
+  log("sortL:\t");
+  log(sortL);
+  log("\tin volts:\t");
+  logln(intsToVolts(sortL));
+
+  for (uint16_t i = 0; i < sampleSize; i++) {   // filling the buffer with input reads
+      updateSMA(readout());
+      logln("Filling buffer!");
+    }
+}
+
+//loop variables
+uint16_t data = 4095;
+uint16_t dataPrev = 4095;
+uint16_t dataPeak = 4095;
+unsigned long t1 = 0;
+unsigned long t2 = 0;
+unsigned long tlast = 0;
+
+void loop() {
+  dataPrev = data;
+  data = readout();                             //get signal from detector
+  // data = updateSMA(data);
+
+  if ((dataPrev > thresh) and (data < thresh)) {         //left event border
+    t1 = micros(); 
+    logln("Left event border!");
+    log("t1 = ");
+    logln(t1);
+  }  
+  
+  if ((dataPrev < thresh) and (data > thresh)) {         //right event border
+    tlast = t2;
+    t2 = micros(); 
+    logln("Right event border!");
+    log("tlast = ");
+    logln(tlast);
+    log("t2 = ");
+    logln(t2);
+  
+                                                          //check size
+    if(((t1-tlast) > minDist) && ((t2-t1) > peakWL) && ((t2-t1) < peakWH)) {
+      logln("Size ok: (t2-t1) > peakWL and < peakWH");
+                                                          //check voltage
+      if ((dataPeak > sortL) && (dataPeak < sortH)) {
+        log("Voltage ok: dataPeak = ");
+        log(dataPeak);
+        logln(" > sortL and < sortH");
+        
+        pulse();
+      }
+    }
+  }
+  //below thresh control
+  if (data < thresh) {
+    if (data < dataPeak) {
+      logln("new dataPeak Value!");
+      dataPeak = data;
+    }
+  } 
+  //above thresh control
+  if (data > thresh) {
+    log("reseting dataPeakValue!");
+    dataPeak = 4095;
+  }
+}
+
+uint16_t voltsToInt(float voltsValue) {
+  uint16_t adcValue = voltsValue * 4096 / 10;
+  return adcValue;
+}
+
+float intsToVolts(uint16_t adcValue) {
+  float voltsValue = adcValue * 10 / 4096;
+  return voltsValue;
+}
+
+//read the detector voltage
+uint16_t readout() {
+  while ((ADC->ADC_ISR & 0x80) == 0);      //wait for the ADC conversion
+    uint16_t sensorValue = ADC->ADC_CDR[7];  //get the latest ADC value from A0
+    return sensorValue;
+}
+
+void pulse() {
+  logln("Shooting impulse!");
+  delayMicroseconds(electrode_delay);
+  PIOB->PIO_SODR = (1 << 27);  // set pin A0 (HIGH state)
+  delayMicroseconds(electrode_pulse);
+  PIOB->PIO_CODR = (1 << 27);  // clear pin A0 (LOW state)
+}
+
+uint16_t updateSMA (uint16_t data) {
+  adcBuffer[adcBufferIndex] = data;       //replace the 'oldest' value in the array with the new one (first in, first out) 
+  adcBufferIndex++;
+  if (adcBufferIndex == sampleSize) {
+    adcBufferIndex = 0;
+  }
+  uint16_t mean = 0;
+  for (uint16_t i = 0; i < sampleSize; i++) {
+    mean += adcBuffer[i];
+  }
+  mean = mean / sampleSize;
+  log("SMA = ");
+  logln(mean);
+  return mean;
+}
